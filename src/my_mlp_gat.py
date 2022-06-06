@@ -14,6 +14,8 @@ from torch_geometric.nn.dense.linear import Linear
 from torch_geometric.nn.inits import glorot, zeros
 from torch_geometric.typing import Adj, OptTensor, PairTensor
 from torch_geometric.utils import add_self_loops, remove_self_loops, softmax, get_laplacian, to_dense_adj
+from torch_geometric.datasets import Planetoid
+
 
 class Eigen(nn.Module):
     def __init__(self, k):
@@ -37,6 +39,7 @@ class Eigen(nn.Module):
             new_edge_features[idx] = new_feat
 
         return new_edge_features
+
 
 class my_MLP_GATConv(MessagePassing):
     _alpha: OptTensor
@@ -63,14 +66,11 @@ class my_MLP_GATConv(MessagePassing):
         self.add_self_loops = add_self_loops
         self.share_weights = share_weights
 
-        self.att_in = Linear(att_in_channels, att_out_channels, bias=bias,
-                            weight_initializer='glorot') 
+        self.att_in = Linear(att_in_channels, att_out_channels, bias=bias, weight_initializer='glorot') 
 
-        self.att_out = Linear(att_out_channels, 1, bias=False,
-                            weight_initializer='glorot') 
+        self.att_out = Linear(att_out_channels, 1, bias=False, weight_initializer='glorot') 
 
-        self.lin = Linear(in_channels, out_channels, bias=bias,
-                            weight_initializer='glorot')
+        self.lin = Linear(in_channels, out_channels, bias=bias, weight_initializer='glorot')
 
         self._alpha = None
         self._pair_pred = None
@@ -85,6 +85,8 @@ class my_MLP_GATConv(MessagePassing):
     def forward(self, x: Union[Tensor, PairTensor], edge_index: Adj,
                 edge_attr: OptTensor = None,
                 return_attention_info: bool = None):
+    
+        print (x.shape, edge_index.shape, edge_attr.shape)
             
         x = self.lin(x)
 
@@ -114,7 +116,7 @@ class my_MLP_GATConv(MessagePassing):
         
         # alpha and beta are set to 1 
         node_attr = self.att_in(cat) # [E, d]
-        
+        print ("shapes", node_attr.shape, edge_attr.shape)
         temp = F.leaky_relu(node_attr + edge_attr) # [E, d]
         project = self.att_out(temp)
         self._pair_pred = project
@@ -128,14 +130,14 @@ class my_MLP_GATConv(MessagePassing):
     def __repr__(self) -> str:
         return (f'{self.__class__.__name__}({self.in_channels}, '
                 f'{self.out_channels})')
-
+    
 class GATv3(nn.Module):
-    def __init__(self, k):
+    def __init__(self, indim, k):
         super().__init__()
 
         self.eigen = Eigen(k)
         self.gat1 = my_MLP_GATConv(
-                        in_channels=1, # w_in
+                        in_channels=indim, # w_in
                         out_channels=1, # w_out
                         att_in_channels=2,
                         att_out_channels=2,
@@ -144,12 +146,18 @@ class GATv3(nn.Module):
 
     def forward(self, x, edge_idx):
         eigen_x = self.eigen(edge_idx)
+        print (eigen_x.shape)
         out = self.gat1(x, edge_idx, edge_attr=eigen_x)
 
         return out
+
+# datasets  = [Planetoid(root='data/CiteSeer/', name='CiteSeer'), Planetoid(root='data/Cora/', name='Cora'),Planetoid(root='data/PubMed/', name='PubMed')]
     
-# g = GATv3(1)
-# x = torch.rand(200, 1)
-# e = torch.randint(0, 200, size=(2, 356))
-# y = g(x, e)
-# print (y.shape)
+# for dt in datasets:
+#     print (dt)
+#     x = dt.data.x
+#     print (x.shape)
+#     e = dt.data.edge_index
+#     g = GATv3(dt.num_features ,1)
+#     y = g(x, e)
+#     print (y.shape)

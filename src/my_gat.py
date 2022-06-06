@@ -13,29 +13,6 @@ from torch_geometric.utils import remove_self_loops, add_self_loops, softmax, ge
 
 from inits import glorot, zeros
 
-class Eigen(nn.Module):
-    def __init__(self, k):
-        super().__init__()
-        self.k = k
-    
-    def forward(self, edge_idx):
-        lap_idx, lap_wt = get_laplacian(edge_idx, normalization="sym")
-        lap_adj = to_dense_adj(lap_idx)
-        eigenvals, eigenvecs = torch.linalg.eig(lap_adj)
-        top_eig = eigenvecs.squeeze(0)[:, 1:self.k+1]
-        top_eig = torch.real(top_eig)
-        new_edge_features = torch.Tensor(edge_idx.size(1), 2 * self.k).to(edge_idx.device)
-        new_edge_idx = edge_idx.T
-
-        for idx, pair in enumerate(new_edge_idx):
-            i, j = pair
-            x_i_prime = top_eig[i]
-            x_j_prime = top_eig[j]
-            new_feat = torch.cat([x_i_prime, x_j_prime], dim=0)
-            new_edge_features[idx] = new_feat
-
-        return new_edge_features
-
 
 class my_GATConv(MessagePassing):
 
