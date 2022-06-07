@@ -1,6 +1,7 @@
 from typing import Optional, Tuple, Union
+import numpy as np
 
-import torch
+import torch, math
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
@@ -39,7 +40,31 @@ class Eigen(nn.Module):
             new_edge_features[idx] = new_feat
 
         return new_edge_features
-
+    
+class Eigen2(nn.Module):
+    def __init__(self, k):
+        super().__init__()
+        self.k = k
+        
+    def forward(self, edge_idx, p, q, n, sigma):
+        lap_idx, lap_wt = get_laplacian(edge_idx, normalization="sym")
+        lap_adj = to_dense_adj(lap_idx)
+        eigenvals, eigenvecs = torch.linalg.eig(lap_adj)
+        top_eig = eigenvecs.squeeze(0)[:, 1:self.k+1]
+        top_eig = torch.real(top_eig)
+        
+        new_edge_features = torch.Tensor(edge_idx.size(1), 1).to(edge_idx.device)
+        new_edge_idx = edge_idx.T
+        
+        for idx, pair in enumerate(new_edge_idx):
+            i, j = pair
+            x_i_prime = top_eig[i]
+            x_j_prime = top_eig[j]
+            dot = torch.dot(x_i_prime, x_j_prime)
+            final = 8 * torch.sqrt(torch.log(torch.tensor(n))) * sigma * torch.sign(dot)
+            new_edge_features[idx] = final
+            
+        return new_edge_features.view(-1, 1)
 
 class my_MLP_GATConv(MessagePassing):
     _alpha: OptTensor
@@ -74,6 +99,8 @@ class my_MLP_GATConv(MessagePassing):
 
         self._alpha = None
         self._pair_pred = None
+        self._phi_attention_score = None
+        self._psi_attention_score = None        
 
         self.reset_parameters()
 
@@ -82,11 +109,9 @@ class my_MLP_GATConv(MessagePassing):
         self.att_out.reset_parameters()
         self.lin.reset_parameters()
 
-    def forward(self, x: Union[Tensor, PairTensor], edge_index: Adj,
-                edge_attr: OptTensor = None,
-                return_attention_info: bool = None):
+    def forward(self, x, edge_index, edge_attr=None, p=0, q=0, return_attention_info=None):
     
-        print (x.shape, edge_index.shape, edge_attr.shape)
+        # print (x.shape, edge_index.shape, edge_attr.shape)
             
         x = self.lin(x)
 
@@ -94,11 +119,16 @@ class my_MLP_GATConv(MessagePassing):
         edge_index, edge_attr = remove_self_loops(edge_index, edge_attr)
         edge_index, edge_attr = add_self_loops(edge_index, edge_attr, num_nodes=num_nodes)
 
-        out = self.propagate(edge_index, x=x, edge_attr=edge_attr, size=None)
+        out = self.propagate(edge_index, x=x, edge_attr=edge_attr, size=None, p=p, q=q)
 
         alpha = self._alpha
         pair_pred = self._pair_pred
+        phi_attention_score = self._phi_attention_score
+        psi_attention_score = self._psi_attention_score
+
         self._alpha = None
+        self._phi_attention_score = None
+        self._psi_attention_score = None
         self._pair_pred = None
 
         out = out.mean(dim=1)
@@ -106,21 +136,28 @@ class my_MLP_GATConv(MessagePassing):
         if isinstance(return_attention_info, bool):
             assert alpha is not None
             assert pair_pred is not None
-            return out, (edge_index, alpha), pair_pred
+            assert phi_attention_score is not None
+            assert psi_attention_score is not None            
+            return out, (edge_index, alpha, phi_attention_score, psi_attention_score), pair_pred
         else:
             return out
 
-    def message(self, x_j, x_i, edge_attr, index, ptr, size_i):
-    
-        cat = torch.cat([x_i, x_j], dim=1)
+    def message(self, x_j, x_i, edge_attr, index, ptr, size_i, p, q):
+        def indicator(p, q, n):
+            if min((p-q)**4, (p-q)**(1/2*q**(7/2))) > (np.log(n)*(p+q)**3)/(140*n):
+                return 1
+            else:
+                return 0
         
-        # alpha and beta are set to 1 
-        node_attr = self.att_in(cat) # [E, d]
-        print ("shapes", node_attr.shape, edge_attr.shape)
-        temp = F.leaky_relu(node_attr + edge_attr) # [E, d]
-        project = self.att_out(temp)
-        self._pair_pred = project
-        gamma = tg.utils.softmax(project, index, ptr, size_i) # [E, d]
+        cat = torch.cat([x_i, x_j], dim=1)
+        node_attr = self.att_out(F.leaky_relu(self.att_in(cat), 0.2)) # [E, 1] -> r(LRelu(S(Wx)))
+        
+        attn = node_attr + edge_attr
+        self._phi_attention_score = node_attr
+        self._psi_attention_score = edge_attr
+        self._pair_pred = attn
+        
+        gamma = tg.utils.softmax(attn, index, ptr, size_i) # [E, 1]
         msg = gamma * x_j # [E, d]
         
         self._alpha = gamma # edge-wise score
@@ -135,7 +172,7 @@ class GATv3(nn.Module):
     def __init__(self, indim, k):
         super().__init__()
 
-        self.eigen = Eigen(k)
+        self.eigen = Eigen2(k)
         self.gat1 = my_MLP_GATConv(
                         in_channels=indim, # w_in
                         out_channels=1, # w_out
@@ -144,20 +181,41 @@ class GATv3(nn.Module):
                         add_self_loops=True
                     )
 
-    def forward(self, x, edge_idx):
-        eigen_x = self.eigen(edge_idx)
-        print (eigen_x.shape)
-        out = self.gat1(x, edge_idx, edge_attr=eigen_x)
+    def forward(self, x, edge_idx, p, q, sigma):
+        eigen_x = self.eigen(edge_idx, p, q, x.size(0), sigma)
+        out = self.gat1(x, edge_idx, edge_attr=eigen_x, p=p, q=q)
 
         return out
 
-# datasets  = [Planetoid(root='data/CiteSeer/', name='CiteSeer'), Planetoid(root='data/Cora/', name='Cora'),Planetoid(root='data/PubMed/', name='PubMed')]
+# datasets  = [Planetoid(root='data/CiteSeer/', name='CiteSeer')]
+
+# def get_graph_stats(edge_idx, y):
+#     new_edge_idx = edge_idx.T
+#     total_edges = new_edge_idx.size(0)
+#     p = 0
+#     q = 0
+#     for idx, pair in enumerate(new_edge_idx):
+#         i, j = pair
+#         if y[i] == y[j]:
+#             p += 1
+#         else:
+#             q += 1
+    
+#     p = p/total_edges
+#     q = q/total_edges
+        
+#     return p, q
     
 # for dt in datasets:
 #     print (dt)
 #     x = dt.data.x
-#     print (x.shape)
 #     e = dt.data.edge_index
-#     g = GATv3(dt.num_features ,1)
-#     y = g(x, e)
-#     print (y.shape)
+#     y = dt.data.y
+#     n = x.size(0)
+
+#     p, q = get_graph_stats(e, y)
+#     sigma = torch.std(x)
+    
+#     g = GATv3(dt.num_features, 1)
+#     pred = g(x, e, p=p, q=q, sigma=sigma)
+#     print (pred.shape)
