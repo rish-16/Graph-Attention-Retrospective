@@ -66,7 +66,7 @@ class Eigen2(nn.Module):
             
         return new_edge_features.view(-1, 1)
 
-class my_MLP_GATConv(MessagePassing):
+class GATv3Layer(MessagePassing):
     _alpha: OptTensor
 
     def __init__(
@@ -109,7 +109,7 @@ class my_MLP_GATConv(MessagePassing):
         self.att_out.reset_parameters()
         self.lin.reset_parameters()
 
-    def forward(self, x, edge_index, edge_attr=None, p=0, q=0, return_attention_info=None):
+    def forward(self, x, edge_index, edge_attr=None, cur_mu=0, sigma=0, return_attention_info=None):
     
         # print (x.shape, edge_index.shape, edge_attr.shape)
             
@@ -119,7 +119,7 @@ class my_MLP_GATConv(MessagePassing):
         edge_index, edge_attr = remove_self_loops(edge_index, edge_attr)
         edge_index, edge_attr = add_self_loops(edge_index, edge_attr, num_nodes=num_nodes)
 
-        out = self.propagate(edge_index, x=x, edge_attr=edge_attr, size=None, p=p, q=q)
+        out = self.propagate(edge_index, x=x, edge_attr=edge_attr, size=None, cur_mu=cur_mu, sigma=sigma)
 
         alpha = self._alpha
         pair_pred = self._pair_pred
@@ -142,17 +142,30 @@ class my_MLP_GATConv(MessagePassing):
         else:
             return out
 
-    def message(self, x_j, x_i, edge_attr, index, ptr, size_i, p, q):
-        def indicator(p, q, n):
-            if min((p-q)**4, (p-q)**(1/2*q**(7/2))) > (np.log(n)*(p+q)**3)/(140*n):
+    def message(self, x_j, x_i, edge_attr, index, ptr, size_i, cur_mu, sigma):
+        def indicator(n, sigma, mu):
+            if np.abs(mu) >= 4 * sigma * np.sqrt(2 * np.log(n)):
                 return 1
             else:
                 return 0
         
+        print ("with indicator", cur_mu, sigma)
+        
+        """
+        if distance between means (mu) is not that big, we use edge_attr
+        """
+        
         cat = torch.cat([x_i, x_j], dim=1)
         node_attr = self.att_out(F.leaky_relu(self.att_in(cat), 0.2)) # [E, 1] -> r(LRelu(S(Wx)))
         
-        attn = node_attr + edge_attr
+        indic = indicator(x_i.size(0), sigma, cur_mu)
+        if indic == 1: # distance is big
+            attn = node_attr
+        else: # distance is small
+            attn = edge_attr
+            
+        # attn = (1 - indic)*node_attr + indic*edge_attr
+        
         self._phi_attention_score = node_attr
         self._psi_attention_score = edge_attr
         self._pair_pred = attn
@@ -168,24 +181,24 @@ class my_MLP_GATConv(MessagePassing):
         return (f'{self.__class__.__name__}({self.in_channels}, '
                 f'{self.out_channels})')
     
-class GATv3(nn.Module):
-    def __init__(self, indim, k):
-        super().__init__()
+# class GATv3(nn.Module):
+#     def __init__(self, indim, k):
+#         super().__init__()
 
-        self.eigen = Eigen2(k)
-        self.gat1 = my_MLP_GATConv(
-                        in_channels=indim, # w_in
-                        out_channels=1, # w_out
-                        att_in_channels=2,
-                        att_out_channels=2,
-                        add_self_loops=True
-                    )
+#         self.eigen = Eigen2(k)
+#         self.gat1 = my_MLP_GATConv(
+#                         in_channels=indim, # w_in
+#                         out_channels=1, # w_out
+#                         att_in_channels=2,
+#                         att_out_channels=2,
+#                         add_self_loops=True
+#                     )
 
-    def forward(self, x, edge_idx, p, q, sigma):
-        eigen_x = self.eigen(edge_idx, p, q, x.size(0), sigma)
-        out = self.gat1(x, edge_idx, edge_attr=eigen_x, p=p, q=q)
+#     def forward(self, x, edge_idx, p, q, sigma):
+#         eigen_x = self.eigen(edge_idx, p, q, x.size(0), sigma)
+#         out = self.gat1(x, edge_idx, edge_attr=eigen_x, p=p, q=q)
 
-        return out
+#         return out
 
 # datasets  = [Planetoid(root='data/CiteSeer/', name='CiteSeer')]
 
