@@ -47,9 +47,9 @@ class Eigen2(nn.Module):
         self.k = k
         
     def forward(self, edge_idx, p, q, n, sigma):
-        lap_idx, lap_wt = get_laplacian(edge_idx, normalization="sym")
-        lap_adj = to_dense_adj(lap_idx)
-        eigenvals, eigenvecs = torch.linalg.eig(lap_adj)
+        # lap_idx, lap_wt = get_laplacian(edge_idx, normalization="sym")
+        lap_adj = to_dense_adj(edge_idx)
+        eigenvals, eigenvecs = torch.linalg.eig(edge_idx)
         top_eig = eigenvecs.squeeze(0)[:, 1:self.k+1]
         top_eig = torch.real(top_eig)
         
@@ -115,9 +115,9 @@ class GATv3Layer(MessagePassing):
             
         x = self.lin(x)
 
-        num_nodes = x.size(0)
-        edge_index, edge_attr = remove_self_loops(edge_index, edge_attr)
-        edge_index, edge_attr = add_self_loops(edge_index, edge_attr, num_nodes=num_nodes)
+        # num_nodes = x.size(0)
+        # edge_index, edge_attr = remove_self_loops(edge_index, edge_attr)
+        # edge_index, edge_attr = add_self_loops(edge_index, edge_attr, num_nodes=num_nodes)
 
         out = self.propagate(edge_index, x=x, edge_attr=edge_attr, size=None, cur_mu=cur_mu, sigma=sigma)
 
