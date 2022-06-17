@@ -46,10 +46,10 @@ class Eigen2(nn.Module):
         super().__init__()
         self.k = k
         
-    def forward(self, edge_idx, p, q, n, sigma):
+    def forward(self, edge_idx, n, sigma):
         # lap_idx, lap_wt = get_laplacian(edge_idx, normalization="sym")
-        lap_adj = to_dense_adj(edge_idx)
-        eigenvals, eigenvecs = torch.linalg.eig(edge_idx)
+        edge_adj = to_dense_adj(edge_idx)
+        eigenvals, eigenvecs = torch.linalg.eig(edge_adj)
         top_eig = eigenvecs.squeeze(0)[:, 1:self.k+1]
         top_eig = torch.real(top_eig)
         
@@ -64,7 +64,7 @@ class Eigen2(nn.Module):
             final = 8 * torch.sqrt(torch.log(torch.tensor(n))) * sigma * torch.sign(dot)
             new_edge_features[idx] = final
             
-        return new_edge_features.view(-1, 1)
+        return new_edge_features.view(-1, 1), eigenvals, top_eig
 
 class GATv3Layer(MessagePassing):
     _alpha: OptTensor
@@ -100,7 +100,8 @@ class GATv3Layer(MessagePassing):
         self._alpha = None
         self._pair_pred = None
         self._phi_attention_score = None
-        self._psi_attention_score = None        
+        self._psi_attention_score = None       
+        self._indic = None       
 
         self.reset_parameters()
 
@@ -125,11 +126,13 @@ class GATv3Layer(MessagePassing):
         pair_pred = self._pair_pred
         phi_attention_score = self._phi_attention_score
         psi_attention_score = self._psi_attention_score
+        indic = self._indic
 
         self._alpha = None
         self._phi_attention_score = None
         self._psi_attention_score = None
         self._pair_pred = None
+        self._indic = None
 
         out = out.mean(dim=1)
 
@@ -138,13 +141,13 @@ class GATv3Layer(MessagePassing):
             assert pair_pred is not None
             assert phi_attention_score is not None
             assert psi_attention_score is not None            
-            return out, (edge_index, alpha, phi_attention_score, psi_attention_score), pair_pred
+            return out, (edge_index, alpha, phi_attention_score, psi_attention_score, indic), pair_pred
         else:
             return out
 
     def message(self, x_j, x_i, edge_attr, index, ptr, size_i, cur_mu, sigma):
         def indicator(n, sigma, mu):
-            if np.abs(mu) >= 4 * sigma * np.sqrt(2 * np.log(n)):
+            if np.linalg.norm(mu) >= 0.5 * sigma * np.sqrt(2 * np.log(n)):
                 return 1
             else:
                 return 0
@@ -156,19 +159,27 @@ class GATv3Layer(MessagePassing):
         """
         
         cat = torch.cat([x_i, x_j], dim=1)
-        node_attr = self.att_out(F.leaky_relu(self.att_in(cat), 0.2)) # [E, 1] -> r(LRelu(S(Wx)))
+        # [E, 1] -> r(LRelu(S(Wx)))
+        node_attr = self.att_out(F.leaky_relu(self.att_in(cat), 0.2)) 
         
         indic = indicator(x_i.size(0), sigma, cur_mu)
         if indic == 1: # distance is big
-            attn = node_attr
+            print ("Activating Phi")
+            attn = node_attr # phi
         else: # distance is small
-            attn = edge_attr
+            print ("Activating Psi")
+            attn = edge_attr # psi
             
         # attn = (1 - indic)*node_attr + indic*edge_attr
+        
+        print ("Indicator:", indic)
         
         self._phi_attention_score = node_attr
         self._psi_attention_score = edge_attr
         self._pair_pred = attn
+        self._indic = indic
+        
+        # attn = n
         
         gamma = tg.utils.softmax(attn, index, ptr, size_i) # [E, 1]
         msg = gamma * x_j # [E, d]
